@@ -1,64 +1,60 @@
-from flask import Flask, request, jsonify
+import os
 import cv2
 import numpy as np
-import io
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Load YOLOv4-tiny model
-net = cv2.dnn.readNet("yolov4-tiny.weights", "yolov4-tiny.cfg")
-layer_names = net.getLayerNames()
-output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+# Get the directory of the current script (cloud_server.py)
+base_path = os.path.dirname(os.path.abspath(__file__))
 
-# Load labels
-with open("coco.names", "r") as f:
-    classes = [line.strip() for line in f.readlines()]
+# Define paths to the YOLOv4 Tiny config, weights, and coco.names
+cfg_path = os.path.join(base_path, "yolov4-tiny.cfg")
+weights_path = os.path.join(base_path, "yolov4-tiny.weights")
+names_path = os.path.join(base_path, "coco.names")
 
-vehicle_classes = {"car", "bus", "truck", "motorbike"}
+# Load YOLOv4-tiny model using OpenCV DNN module
+yolo_net = cv2.dnn.readNet(weights_path, cfg_path)
+layer_names = yolo_net.getLayerNames()
+output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    try:
-        img_data = request.data
-        nparr = np.frombuffer(img_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+# Load COCO class labels
+with open(names_path, "r") as f:
+    classes = f.read().strip().split("\n")
 
-        height, width, _ = img.shape
-        blob = cv2.dnn.blobFromImage(img, 1/255, (416, 416), swapRB=True, crop=False)
+def detect_vehicles(image):
+    height, width, channels = image.shape
 
-        net.setInput(blob)
-        outs = net.forward(output_layers)
+    # Prepare the image for YOLO
+    blob = cv2.dnn.blobFromImage(image, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+    yolo_net.setInput(blob)
+    detections = yolo_net.forward(output_layers)
 
-        class_ids = []
-        confidences = []
-        boxes = []
-        vehicle_types = []
+    vehicle_count = 0
+    for detection in detections:
+        for obj in detection:
+            scores = obj[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
+            
+            if confidence > 0.5:  # Confidence threshold
+                if classes[class_id] in ["car", "motorbike", "bus", "truck"]:  # Vehicle classes in COCO
+                    vehicle_count += 1
 
-        for out in outs:
-            for detection in out:
-                scores = detection[5:]
-                class_id = np.argmax(scores)
-                confidence = scores[class_id]
-                label = classes[class_id]
-                if confidence > 0.5 and label in vehicle_classes:
-                    vehicle_types.append(label)
+    return vehicle_count
 
-        count = len(vehicle_types)
-        density = "LOW" if count <= 2 else "MEDIUM" if count <= 5 else "HIGH"
-        most_common = max(set(vehicle_types), key=vehicle_types.count) if vehicle_types else "NONE"
+@app.route('/upload', methods=['POST'])
+def upload_image():
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file provided"}), 400
 
-        return jsonify({
-            "count": count,
-            "density": density,
-            "type": most_common
-        })
+    image_file = request.files['image']
+    img_array = np.frombuffer(image_file.read(), np.uint8)
+    image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    
+    vehicle_count = detect_vehicles(image)
 
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-@app.route('/')
-def home():
-    return 'YOLOv4-Tiny Flask Server is running!'
+    return jsonify({"vehicle_count": vehicle_count})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
