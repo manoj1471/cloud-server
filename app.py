@@ -47,7 +47,10 @@ def detect_vehicles(image):
 @app.route('/upload', methods=['POST'])
 def upload_image():
     if request.method == 'POST':
+        app.logger.debug(f"request data: {request.data}")
         data = request.get_json()
+        app.logger.debug(f"Parsed JSON: {data}")
+
 
         # Check if 'image' is in the request
         if 'image' not in data:
