@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 from flask import Flask, request, jsonify
+import base64
 
 app = Flask(__name__)
 
@@ -45,16 +46,27 @@ def detect_vehicles(image):
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    if 'image' not in request.files:
-        return jsonify({"error": "No image file provided"}), 400
+    if request.method == 'POST':
+        data = request.get_json()
 
-    image_file = request.files['image']
-    img_array = np.frombuffer(image_file.read(), np.uint8)
-    image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    
-    vehicle_count = detect_vehicles(image)
+        # Check if 'image' is in the request
+        if 'image' not in data:
+            return jsonify({"error": "No image data provided"}), 400
 
-    return jsonify({"vehicle_count": vehicle_count})
+        # Get base64 encoded image
+        img_data = base64.b64decode(data['image'])
+
+        # Convert byte data to numpy array
+        nparr = np.frombuffer(img_data, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if image is None:
+            return jsonify({"error": "Failed to decode image"}), 400
+
+        # Detect vehicles in the image
+        vehicle_count = detect_vehicles(image)
+
+        return jsonify({"vehicle_count": vehicle_count})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
