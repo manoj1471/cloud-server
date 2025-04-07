@@ -49,6 +49,7 @@ def upload_image():
     if request.method == 'POST':
         app.logger.debug(f"request data: {request.data}")
         data = request.get_json()
+        print(f"Received Data: {data}")
         app.logger.debug(f"Parsed JSON: {data}")
 
 
