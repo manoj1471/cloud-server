@@ -6,27 +6,25 @@ import time
 app = Flask(__name__)
 
 # Load YOLO
-net = cv2.dnn.readNet('yolov4-tiny.weights', 'yolov4-tiny.cfg')
-with open('coco.names', 'r') as f:
+net = cv2.dnn.readNet("yolov4-tiny.weights", "yolov4-tiny.cfg")
+with open("coco.names", "r") as f:
     classes = [line.strip() for line in f.readlines()]
 layer_names = net.getLayerNames()
 output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers().flatten()]
+vehicle_classes = ["car", "bus", "truck", "motorbike"]
 
-vehicle_classes = ['car', 'bus', 'truck', 'motorbike']
-
-esp32_url = 'http://192.168.203.244:81/stream'  # Your ESP32 stream URL
+# Stream URL from ESP32
+esp32_url = "http://192.168.203.244:81/stream"
 cap = cv2.VideoCapture(esp32_url)
 
-# Traffic logic
-line_y = 400
-already_counted = []
-total_count = 0
-last_switch_time = time.time()
+# Logic
+roi_y1, roi_y2 = 300, 480
 light_state = "RED"
+last_switch_time = time.time()
 green_duration = 10
 
 def generate_frames():
-    global already_counted, total_count, last_switch_time, light_state, green_duration
+    global light_state, last_switch_time, green_duration
 
     while True:
         ret, frame = cap.read()
@@ -36,46 +34,45 @@ def generate_frames():
         height, width = frame.shape[:2]
         blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
         net.setInput(blob)
-        outs = net.forward(output_layers)
+        outputs = net.forward(output_layers)
 
         boxes, confidences, class_ids = [], [], []
-        for out in outs:
-            for detection in out:
+        for output in outputs:
+            for detection in output:
                 scores = detection[5:]
                 class_id = np.argmax(scores)
                 confidence = scores[class_id]
                 if confidence > 0.5:
-                    center_x, center_y = int(detection[0]*width), int(detection[1]*height)
-                    w, h = int(detection[2]*width), int(detection[3]*height)
-                    x, y = int(center_x - w/2), int(center_y - h/2)
+                    cx = int(detection[0] * width)
+                    cy = int(detection[1] * height)
+                    w = int(detection[2] * width)
+                    h = int(detection[3] * height)
+                    x = int(cx - w/2)
+                    y = int(cy - h/2)
 
                     boxes.append([x, y, w, h])
                     confidences.append(float(confidence))
                     class_ids.append(class_id)
 
         indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
-        vehicles_in_roi = 0
+        vehicle_count = 0
 
         if len(indexes) > 0:
             for i in indexes.flatten():
                 label = str(classes[class_ids[i]])
                 if label in vehicle_classes:
                     x, y, w, h = boxes[i]
-                    cx, cy = x + w // 2, y + h // 2
+                    cx = x + w // 2
+                    cy = y + h // 2
+                    if roi_y1 < cy < roi_y2:
+                        vehicle_count += 1
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                    cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+                    cv2.putText(frame, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                    if line_y - 20 < cy < line_y + 20:
-                        if all(abs(cx - px) > 50 or abs(cy - py) > 50 for (px, py) in already_counted):
-                            total_count += 1
-                            already_counted.append((cx, cy))
-                    if cy > line_y:
-                        vehicles_in_roi += 1
-
-        # Traffic light logic
-        if vehicles_in_roi < 5:
+        # Update traffic logic
+        if vehicle_count < 5:
             green_duration = 10
-        elif vehicles_in_roi < 10:
+        elif vehicle_count < 10:
             green_duration = 20
         else:
             green_duration = 30
@@ -84,23 +81,25 @@ def generate_frames():
             light_state = "GREEN" if light_state == "RED" else "RED"
             last_switch_time = time.time()
 
-        # Drawing
-        cv2.line(frame, (0, line_y), (width, line_y), (0, 0, 255), 2)
-        cv2.putText(frame, f"Traffic Light: {light_state}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0) if light_state == "GREEN" else (0, 0, 255), 2)
-        cv2.putText(frame, f"Total Vehicles: {total_count}", (10, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+        time_remaining = int(green_duration - (time.time() - last_switch_time))
+        if time_remaining < 0:
+            time_remaining = 0
 
-        # Encode and yield
-        ret, buffer = cv2.imencode('.jpg', frame)
-        frame = buffer.tobytes()
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        # Draw UI
+        light_color = (0, 255, 0) if light_state == "GREEN" else (0, 0, 255)
+        cv2.rectangle(frame, (0, roi_y1), (width, roi_y2), (255, 0, 0), 2)
+        cv2.putText(frame, f"Light: {light_state}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, light_color, 2)
+        cv2.putText(frame, f"Time left: {time_remaining}s", (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(frame, f"Vehicles in ROI: {vehicle_count}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+
+        _, buffer = cv2.imencode('.jpg', frame)
+        frame_bytes = buffer.tobytes()
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 
 @app.route('/')
 def index():
     return render_template('index.html')
-
 
 @app.route('/video')
 def video():
@@ -108,4 +107,4 @@ def video():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000)
